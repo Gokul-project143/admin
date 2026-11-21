@@ -193,11 +193,7 @@
         <td>${escapeHtml(shop.assignedVersion || "—")}</td>
         <td><button class="button secondary rotate-token" data-shop-id="${escapeHtml(shop.shopId)}" type="button">Rotate token</button></td>
         <td class="row-actions">
-<<<<<<< HEAD
-          <button class="button ${isPaused ? "danger" : "secondary"} billing-pass" data-shop-id="${escapeHtml(shop.shopId)}" data-paused="${isPaused ? "true" : "false"}" type="button">${isPaused ? "Resume Billing" : "Pause Billing"}</button>
-=======
-          <button class="button secondary billing-pass" data-shop-id="${escapeHtml(shop.shopId)}" type="button">Pass / Pause Billing</button>
->>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
+          <button class="button ${isPaused ? "danger" : "secondary"} billing-pass" data-shop-id="${escapeHtml(shop.shopId)}" data-paused="${isPaused ? "true" : "false"}" type="button">${isPaused ? "Resume" : "Pause Billing"}</button>
           <button class="button secondary edit-shop" data-shop-id="${escapeHtml(shop.shopId)}" data-shop-name="${escapeHtml(shop.shopName)}" type="button">Edit</button>
           <button class="button danger delete-shop" data-shop-id="${escapeHtml(shop.shopId)}" type="button">Delete</button>
         </td>`;
@@ -241,7 +237,10 @@
         <td>${escapeHtml(release.version)}</td><td>${escapeHtml(release.tag_name)}</td>
         <td><a href="${escapeHtml(release.github_html_url)}" target="_blank" rel="noopener noreferrer">Open</a></td>
         <td>${escapeHtml(formatDate(release.published_at))}</td><td>${release.target_count}</td>
-        <td><button class="button danger delete-release" data-release-id="${release.id}" data-release-version="${escapeHtml(release.version)}" type="button">Delete</button></td>`;
+        <td>
+          <button class="button secondary edit-release" data-release-id="${release.id}" type="button">Edit</button>
+          <button class="button danger delete-release" data-release-id="${release.id}" data-release-version="${escapeHtml(release.version)}" type="button">Delete</button>
+        </td>`;
       releasesBody.append(row);
     }
     updatePushButton();
@@ -368,18 +367,8 @@
     }
     if (button.classList.contains("billing-pass")) {
       const shopId = button.dataset.shopId;
-<<<<<<< HEAD
       const currentlyPaused = button.dataset.paused === "true";
       const normalizedAction = currentlyPaused ? "RESUME" : "PAUSE";
-=======
-      const action = window.prompt(`Enter PAUSE or RESUME for ${shopId}:`, "PAUSE");
-      if (action === null) return;
-      const normalizedAction = action.trim().toUpperCase();
-      if (!["PAUSE", "RESUME"].includes(normalizedAction)) {
-        showNotice("Action must be PAUSE or RESUME.", true);
-        return;
-      }
->>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
       let paidUntil = "";
       if (normalizedAction === "PAUSE") {
         const answer = window.prompt("Optional paid-until date (YYYY-MM-DD):", "");
@@ -393,10 +382,7 @@
           body: JSON.stringify({ action: normalizedAction, paidUntil }),
         });
         showOfflinePassCode(shopId, result.code);
-<<<<<<< HEAD
         await loadShops();
-=======
->>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
         showNotice(`Offline ${normalizedAction.toLowerCase()} code generated for ${shopId}.`);
       } catch (error) {
         showNotice(error.message, true);
@@ -423,8 +409,30 @@
   });
   releasesBody.addEventListener("click", async (event) => {
     const target = event.target instanceof Element ? event.target : event.target.parentElement;
-    const button = target && target.closest(".delete-release");
+    const button = target && target.closest("button");
     if (!button) return;
+    if (button.classList.contains("edit-release")) {
+      const releaseId = button.dataset.releaseId;
+      const release = releases.find((item) => String(item.id) === releaseId);
+      if (!release) return;
+      const notes = window.prompt(`Edit release notes for ${release.version}:`, release.notes);
+      if (notes === null || notes.trim() === "") return;
+      button.disabled = true;
+      try {
+        await api(`/api/admin/releases/${encodeURIComponent(releaseId)}`, {
+          method: "PUT",
+          body: JSON.stringify({ notes }),
+        });
+        await loadReleases();
+        showNotice(`Release ${release.version} notes updated.`);
+      } catch (error) {
+        showNotice(error.message, true);
+      } finally {
+        button.disabled = false;
+      }
+      return;
+    }
+    if (!button.classList.contains("delete-release")) return;
     const releaseId = button.dataset.releaseId;
     const version = button.dataset.releaseVersion;
     if (!window.confirm(`Delete release ${version}? Its shop assignments will be cleared and the GitHub release/tag will also be removed when configured.`)) return;

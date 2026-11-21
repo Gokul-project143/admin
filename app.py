@@ -196,11 +196,8 @@ def _initialize_database():
                     shop_name TEXT NOT NULL,
                     token_hash TEXT NOT NULL UNIQUE,
                     offline_pass_secret TEXT NOT NULL DEFAULT '',
-<<<<<<< HEAD
-                    billing_paused BOOLEAN NOT NULL DEFAULT 0,
+                    billing_paused BOOLEAN NOT NULL DEFAULT FALSE,
                     paid_until TEXT,
-=======
->>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
                     current_version TEXT NOT NULL DEFAULT '',
                     last_seen TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL
@@ -238,11 +235,8 @@ def _initialize_database():
                     shop_name TEXT NOT NULL,
                     token_hash TEXT NOT NULL UNIQUE,
                     offline_pass_secret TEXT NOT NULL DEFAULT '',
-<<<<<<< HEAD
                     billing_paused INTEGER NOT NULL DEFAULT 0,
                     paid_until TEXT,
-=======
->>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
                     current_version TEXT NOT NULL DEFAULT '',
                     last_seen TEXT,
                     created_at TEXT NOT NULL
@@ -279,7 +273,6 @@ def _initialize_database():
                 "ALTER TABLE shops ADD COLUMN IF NOT EXISTS "
                 "offline_pass_secret TEXT NOT NULL DEFAULT ''"
             )
-<<<<<<< HEAD
             db.execute(
                 "ALTER TABLE shops ADD COLUMN IF NOT EXISTS "
                 "billing_paused BOOLEAN NOT NULL DEFAULT FALSE"
@@ -287,8 +280,6 @@ def _initialize_database():
             db.execute(
                 "ALTER TABLE shops ADD COLUMN IF NOT EXISTS paid_until TEXT"
             )
-=======
->>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
         else:
             columns = {
                 row["name"] for row in db.execute("PRAGMA table_info(shops)")
@@ -298,7 +289,6 @@ def _initialize_database():
                     "ALTER TABLE shops ADD COLUMN offline_pass_secret "
                     "TEXT NOT NULL DEFAULT ''"
                 )
-<<<<<<< HEAD
             columns = {
                 row["name"] for row in db.execute("PRAGMA table_info(shops)")
             }
@@ -309,8 +299,6 @@ def _initialize_database():
                 )
             if "paid_until" not in columns:
                 db.execute("ALTER TABLE shops ADD COLUMN paid_until TEXT")
-=======
->>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
         rows = db.execute(
             "SELECT shop_id FROM shops WHERE offline_pass_secret = ''"
         ).fetchall()
@@ -835,16 +823,11 @@ def create_billing_pass(shop_id):
 
     with _database() as db:
         shop = db.execute(
-<<<<<<< HEAD
-            "SELECT offline_pass_secret, billing_paused FROM shops WHERE shop_id = ?",
-=======
             "SELECT offline_pass_secret FROM shops WHERE shop_id = ?",
->>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
             (shop_id,),
         ).fetchone()
     if not shop:
         return jsonify(error="Shop ID not found."), 404
-<<<<<<< HEAD
     billing_paused = action == "PAUSE"
     with _database() as db:
         cursor = db.execute(
@@ -853,8 +836,6 @@ def create_billing_pass(shop_id):
         )
         if cursor.rowcount != 1:
             return jsonify(error="Shop ID not found."), 404
-=======
->>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
 
     payload = {
         "shopId": shop_id,
@@ -875,11 +856,8 @@ def create_billing_pass(shop_id):
         shopId=shop_id,
         action=action,
         paidUntil=paid_until,
-<<<<<<< HEAD
         billingPaused=billing_paused,
         isPaused=billing_paused,
-=======
->>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
         code=f"KGS1.{encoded_payload}.{signature}",
     )
 
@@ -899,6 +877,56 @@ def list_releases():
             """
         ).fetchall()
     return jsonify(releases=[dict(row) for row in rows])
+
+
+@app.put("/api/admin/releases/<release_identifier>")
+def update_release(release_identifier):
+    unauthorized = _require_admin()
+    if unauthorized:
+        return unauthorized
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(error="Provide release notes as a JSON object."), 400
+    notes = body.get("notes")
+    if not isinstance(notes, str) or not notes.strip() or len(notes) > 20000:
+        return jsonify(error="Release notes are required and must be at most 20,000 characters."), 400
+    notes = notes.strip()
+    with _database() as db:
+        if release_identifier.isdecimal():
+            release = db.execute(
+                "SELECT id, version, github_release_id FROM releases WHERE id = ?",
+                (int(release_identifier),),
+            ).fetchone()
+        else:
+            release = db.execute(
+                "SELECT id, version, github_release_id FROM releases WHERE version = ? OR tag_name = ?",
+                (release_identifier, release_identifier),
+            ).fetchone()
+    if not release:
+        return jsonify(error="Release was not found."), 404
+
+    github_updated = False
+    if GITHUB_TOKEN and GITHUB_REPOSITORY and REPOSITORY_PATTERN.fullmatch(GITHUB_REPOSITORY):
+        try:
+            _github_request(
+                "PATCH",
+                f"/repos/{GITHUB_REPOSITORY}/releases/{release['github_release_id']}",
+                {"body": notes},
+            )
+            github_updated = True
+        except RuntimeError as error:
+            app.logger.exception("Unable to update GitHub release %s", release["version"])
+            return jsonify(error=str(error)), 502
+
+    with _database() as db:
+        db.execute("UPDATE releases SET notes = ? WHERE id = ?", (notes, release["id"]))
+    return jsonify(
+        updated=True,
+        releaseId=release["id"],
+        version=release["version"],
+        notes=notes,
+        githubUpdated=github_updated,
+    )
 
 
 @app.delete("/api/admin/releases/<release_identifier>")

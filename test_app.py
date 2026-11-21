@@ -95,11 +95,9 @@ class DashboardApiTests(unittest.TestCase):
         script = self.client.get("/app.js")
         self.assertIn(b"/api/admin/shops", script.data)
         self.assertIn(b"billing-pass", script.data)
-<<<<<<< HEAD
-        self.assertIn(b"Resume Billing", script.data)
+        self.assertIn(b'${isPaused ? "Resume" : "Pause Billing"}', script.data)
         self.assertIn(b"Pause Billing", script.data)
-=======
->>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
+        self.assertIn(b"edit-release", script.data)
         script.close()
 
     def _create_shop(self, shop_id):
@@ -180,6 +178,44 @@ class DashboardApiTests(unittest.TestCase):
             "postgresql://user:password@localhost/app",
         )
         self.assertEqual(dashboard_app._normalize_database_url(""), "")
+
+    def test_database_initialization_migrates_legacy_sqlite_shop_columns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "legacy.sqlite3"
+            connection = dashboard_app.sqlite3.connect(database_path)
+            connection.execute(
+                """
+                CREATE TABLE shops (
+                    shop_id TEXT PRIMARY KEY,
+                    shop_name TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    current_version TEXT NOT NULL DEFAULT '',
+                    last_seen TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "INSERT INTO shops (shop_id, shop_name, token_hash, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("SHOP-OLD", "Legacy Shop", "old-token-hash", "2026-01-01T00:00:00+00:00"),
+            )
+            connection.commit()
+            connection.close()
+
+            with patch.object(dashboard_app, "DATABASE_PATH", database_path), \
+                    patch.object(dashboard_app, "DATABASE_URL", ""):
+                dashboard_app._initialize_database()
+                with dashboard_app._database() as db:
+                    migrated = db.execute(
+                        "SELECT offline_pass_secret, billing_paused, paid_until "
+                        "FROM shops WHERE shop_id = ?",
+                        ("SHOP-OLD",),
+                    ).fetchone()
+
+        self.assertTrue(migrated["offline_pass_secret"])
+        self.assertFalse(migrated["billing_paused"])
+        self.assertIsNone(migrated["paid_until"])
 
     def test_missing_optional_configuration_logs_warnings_without_secrets(self):
         with patch.object(dashboard_app, "ADMIN_API_TOKEN", ""), \
@@ -331,7 +367,6 @@ class DashboardApiTests(unittest.TestCase):
         ).hexdigest()
         self.assertTrue(hmac.compare_digest(signature, expected))
         self.assertEqual(result["paidUntil"], "2027-01-31")
-<<<<<<< HEAD
         self.assertTrue(result["billingPaused"])
         self.assertTrue(result["isPaused"])
 
@@ -367,8 +402,6 @@ class DashboardApiTests(unittest.TestCase):
         listed_shop = next(shop for shop in listed["shops"] if shop["shopId"] == "SHOP-001")
         self.assertFalse(listed_shop["billingPaused"])
         self.assertFalse(listed_shop["isPaused"])
-=======
->>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
 
         invalid_action = self.client.post(
             "/api/admin/shops/SHOP-001/billing-pass",
@@ -540,6 +573,53 @@ class DashboardApiTests(unittest.TestCase):
         )
         self.assertTrue(github_request.call_args_list[0].kwargs["allow_not_found"])
         self.assertTrue(github_request.call_args_list[1].kwargs["allow_not_found"])
+
+    def test_release_notes_can_be_edited_and_synced_to_github(self):
+        release_id = self._create_release()
+        with patch.object(dashboard_app, "GITHUB_TOKEN", "configured-token"), \
+                patch.object(dashboard_app, "GITHUB_REPOSITORY", "owner/repo"), \
+                patch.object(dashboard_app, "_github_request", return_value={}) as github_request:
+            response = self.client.put(
+                f"/api/admin/releases/{release_id}",
+                headers=self.admin_headers,
+                json={"notes": "Updated release notes"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["notes"], "Updated release notes")
+        self.assertTrue(response.get_json()["githubUpdated"])
+        github_request.assert_called_once_with(
+            "PATCH",
+            "/repos/owner/repo/releases/15",
+            {"body": "Updated release notes"},
+        )
+        with dashboard_app._database() as db:
+            release = db.execute(
+                "SELECT version, tag_name, notes FROM releases WHERE id = ?",
+                (release_id,),
+            ).fetchone()
+        self.assertEqual(release["version"], "1.1.0")
+        self.assertEqual(release["tag_name"], "v1.1.0")
+        self.assertEqual(release["notes"], "Updated release notes")
+
+        empty_notes = self.client.put(
+            f"/api/admin/releases/{release_id}",
+            headers=self.admin_headers,
+            json={"notes": "  "},
+        )
+        malformed_body = self.client.put(
+            f"/api/admin/releases/{release_id}",
+            headers=self.admin_headers,
+            json=[],
+        )
+        missing_release = self.client.put(
+            "/api/admin/releases/9999",
+            headers=self.admin_headers,
+            json={"notes": "Updated notes"},
+        )
+        self.assertEqual(empty_notes.status_code, 400)
+        self.assertEqual(malformed_body.status_code, 400)
+        self.assertEqual(missing_release.status_code, 404)
 
     def test_release_publish_generates_a_hash_manifest_and_rejects_non_installers(self):
         rejected = self.client.post(
