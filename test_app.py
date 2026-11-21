@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import hmac
 import io
 import os
 import tempfile
@@ -93,6 +94,7 @@ class DashboardApiTests(unittest.TestCase):
         styles.close()
         script = self.client.get("/app.js")
         self.assertIn(b"/api/admin/shops", script.data)
+        self.assertIn(b"billing-pass", script.data)
         script.close()
 
     def _create_shop(self, shop_id):
@@ -302,6 +304,41 @@ class DashboardApiTests(unittest.TestCase):
         )
         self.assertEqual(old_token_response.status_code, 401)
         self.assertEqual(new_token_response.status_code, 200)
+
+    def test_billing_pass_codes_are_signed_for_the_shop_and_validate_action(self):
+        registration = self.client.post(
+            "/api/admin/shops",
+            headers=self.admin_headers,
+            json={"shopId": "SHOP-001", "shopName": "Shop SHOP-001"},
+        ).get_json()
+        secret = registration["clientConfig"]["offlinePassSecret"]
+        response = self.client.post(
+            "/api/admin/shops/SHOP-001/billing-pass",
+            headers=self.admin_headers,
+            json={"action": "PAUSE", "paidUntil": "2027-01-31"},
+        )
+        self.assertEqual(response.status_code, 200)
+        result = response.get_json()
+        prefix, encoded_payload, signature = result["code"].split(".")
+        self.assertEqual(prefix, "KGS1")
+        expected = hmac.new(
+            secret.encode("utf-8"), encoded_payload.encode("ascii"), hashlib.sha256
+        ).hexdigest()
+        self.assertTrue(hmac.compare_digest(signature, expected))
+        self.assertEqual(result["paidUntil"], "2027-01-31")
+
+        invalid_action = self.client.post(
+            "/api/admin/shops/SHOP-001/billing-pass",
+            headers=self.admin_headers,
+            json={"action": "UNLOCK"},
+        )
+        self.assertEqual(invalid_action.status_code, 400)
+        invalid_date = self.client.post(
+            "/api/admin/shops/SHOP-001/billing-pass",
+            headers=self.admin_headers,
+            json={"action": "PAUSE", "paidUntil": "next month"},
+        )
+        self.assertEqual(invalid_date.status_code, 400)
 
     def test_shop_can_be_edited_and_deleted(self):
         self._create_shop("SHOP-001")

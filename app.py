@@ -195,6 +195,7 @@ def _initialize_database():
                     shop_id TEXT PRIMARY KEY,
                     shop_name TEXT NOT NULL,
                     token_hash TEXT NOT NULL UNIQUE,
+                    offline_pass_secret TEXT NOT NULL DEFAULT '',
                     current_version TEXT NOT NULL DEFAULT '',
                     last_seen TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL
@@ -231,6 +232,7 @@ def _initialize_database():
                     shop_id TEXT PRIMARY KEY,
                     shop_name TEXT NOT NULL,
                     token_hash TEXT NOT NULL UNIQUE,
+                    offline_pass_secret TEXT NOT NULL DEFAULT '',
                     current_version TEXT NOT NULL DEFAULT '',
                     last_seen TEXT,
                     created_at TEXT NOT NULL
@@ -262,6 +264,28 @@ def _initialize_database():
             )
         for statement in statements:
             db.execute(statement)
+        if DATABASE_URL:
+            db.execute(
+                "ALTER TABLE shops ADD COLUMN IF NOT EXISTS "
+                "offline_pass_secret TEXT NOT NULL DEFAULT ''"
+            )
+        else:
+            columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(shops)")
+            }
+            if "offline_pass_secret" not in columns:
+                db.execute(
+                    "ALTER TABLE shops ADD COLUMN offline_pass_secret "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
+        rows = db.execute(
+            "SELECT shop_id FROM shops WHERE offline_pass_secret = ''"
+        ).fetchall()
+        for row in rows:
+            db.execute(
+                "UPDATE shops SET offline_pass_secret = ? WHERE shop_id = ?",
+                (secrets.token_urlsafe(32), row["shop_id"]),
+            )
 
 
 def _now():
@@ -660,12 +684,15 @@ def create_shop():
     if not SHOP_ID_PATTERN.fullmatch(shop_id) or not shop_name or len(shop_name) > 120:
         return jsonify(error="Provide a valid Shop ID (up to 64 safe characters) and Shop Name."), 400
     token = secrets.token_urlsafe(32)
+    offline_pass_secret = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     try:
         with _database() as db:
             db.execute(
-                "INSERT INTO shops (shop_id, shop_name, token_hash, created_at) VALUES (?, ?, ?, ?)",
-                (shop_id, shop_name, token_hash, _now()),
+                "INSERT INTO shops "
+                "(shop_id, shop_name, token_hash, offline_pass_secret, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (shop_id, shop_name, token_hash, offline_pass_secret, _now()),
             )
     except (sqlite3.IntegrityError, psycopg2.IntegrityError):
         return jsonify(error="That Shop ID already exists."), 409
@@ -678,8 +705,9 @@ def create_shop():
             "shopId": shop_id,
             "shopName": shop_name,
             "shopToken": token,
+            "offlinePassSecret": offline_pass_secret,
         },
-        warning="Copy this token now. It cannot be retrieved later.",
+        warning="Copy the client config now. It contains the one-time shop token and the offline pass secret.",
     ), 201
 
 
@@ -727,7 +755,7 @@ def rotate_shop_token(shop_id):
             (token_hash, shop_id),
         )
         shop = db.execute(
-            "SELECT shop_name FROM shops WHERE shop_id = ?",
+            "SELECT shop_name, offline_pass_secret FROM shops WHERE shop_id = ?",
             (shop_id,),
         ).fetchone()
     if cursor.rowcount != 1 or not shop:
@@ -740,8 +768,62 @@ def rotate_shop_token(shop_id):
             "shopId": shop_id,
             "shopName": shop["shop_name"],
             "shopToken": token,
+            "offlinePassSecret": shop["offline_pass_secret"],
         },
-        warning="The previous token is now invalid. Copy this token; it cannot be retrieved later.",
+        warning="The previous token is now invalid. Copy the replacement client config before closing this message.",
+    )
+
+
+@app.post("/api/admin/shops/<shop_id>/billing-pass")
+def create_billing_pass(shop_id):
+    unauthorized = _require_admin()
+    if unauthorized:
+        return unauthorized
+    body = request.get_json(silent=True) or {}
+    action = str(body.get("action", "")).strip().upper()
+    if action not in {"PAUSE", "RESUME"}:
+        return jsonify(error="Action must be PAUSE or RESUME."), 400
+    paid_until = body.get("paidUntil")
+    if action == "RESUME":
+        paid_until = None
+    elif paid_until not in (None, ""):
+        if not isinstance(paid_until, str):
+            return jsonify(error="paidUntil must be a date in YYYY-MM-DD format."), 400
+        try:
+            datetime.strptime(paid_until, "%Y-%m-%d")
+        except ValueError:
+            return jsonify(error="paidUntil must be a date in YYYY-MM-DD format."), 400
+    else:
+        paid_until = None
+
+    with _database() as db:
+        shop = db.execute(
+            "SELECT offline_pass_secret FROM shops WHERE shop_id = ?",
+            (shop_id,),
+        ).fetchone()
+    if not shop:
+        return jsonify(error="Shop ID not found."), 404
+
+    payload = {
+        "shopId": shop_id,
+        "action": action,
+        "paidUntil": paid_until,
+        "issuedAt": time.time_ns(),
+        "nonce": secrets.token_urlsafe(12),
+    }
+    encoded_payload = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    signature = hmac.new(
+        shop["offline_pass_secret"].encode("utf-8"),
+        encoded_payload.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return jsonify(
+        shopId=shop_id,
+        action=action,
+        paidUntil=paid_until,
+        code=f"KGS1.{encoded_payload}.{signature}",
     )
 
 
