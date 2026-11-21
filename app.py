@@ -196,8 +196,11 @@ def _initialize_database():
                     shop_name TEXT NOT NULL,
                     token_hash TEXT NOT NULL UNIQUE,
                     offline_pass_secret TEXT NOT NULL DEFAULT '',
+<<<<<<< HEAD
                     billing_paused BOOLEAN NOT NULL DEFAULT 0,
                     paid_until TEXT,
+=======
+>>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
                     current_version TEXT NOT NULL DEFAULT '',
                     last_seen TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL
@@ -235,8 +238,11 @@ def _initialize_database():
                     shop_name TEXT NOT NULL,
                     token_hash TEXT NOT NULL UNIQUE,
                     offline_pass_secret TEXT NOT NULL DEFAULT '',
+<<<<<<< HEAD
                     billing_paused INTEGER NOT NULL DEFAULT 0,
                     paid_until TEXT,
+=======
+>>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
                     current_version TEXT NOT NULL DEFAULT '',
                     last_seen TEXT,
                     created_at TEXT NOT NULL
@@ -273,6 +279,7 @@ def _initialize_database():
                 "ALTER TABLE shops ADD COLUMN IF NOT EXISTS "
                 "offline_pass_secret TEXT NOT NULL DEFAULT ''"
             )
+<<<<<<< HEAD
             db.execute(
                 "ALTER TABLE shops ADD COLUMN IF NOT EXISTS "
                 "billing_paused BOOLEAN NOT NULL DEFAULT FALSE"
@@ -280,6 +287,8 @@ def _initialize_database():
             db.execute(
                 "ALTER TABLE shops ADD COLUMN IF NOT EXISTS paid_until TEXT"
             )
+=======
+>>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
         else:
             columns = {
                 row["name"] for row in db.execute("PRAGMA table_info(shops)")
@@ -289,6 +298,7 @@ def _initialize_database():
                     "ALTER TABLE shops ADD COLUMN offline_pass_secret "
                     "TEXT NOT NULL DEFAULT ''"
                 )
+<<<<<<< HEAD
             columns = {
                 row["name"] for row in db.execute("PRAGMA table_info(shops)")
             }
@@ -299,6 +309,8 @@ def _initialize_database():
                 )
             if "paid_until" not in columns:
                 db.execute("ALTER TABLE shops ADD COLUMN paid_until TEXT")
+=======
+>>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
         rows = db.execute(
             "SELECT shop_id FROM shops WHERE offline_pass_secret = ''"
         ).fetchall()
@@ -823,11 +835,16 @@ def create_billing_pass(shop_id):
 
     with _database() as db:
         shop = db.execute(
+<<<<<<< HEAD
             "SELECT offline_pass_secret, billing_paused FROM shops WHERE shop_id = ?",
+=======
+            "SELECT offline_pass_secret FROM shops WHERE shop_id = ?",
+>>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
             (shop_id,),
         ).fetchone()
     if not shop:
         return jsonify(error="Shop ID not found."), 404
+<<<<<<< HEAD
     billing_paused = action == "PAUSE"
     with _database() as db:
         cursor = db.execute(
@@ -836,6 +853,8 @@ def create_billing_pass(shop_id):
         )
         if cursor.rowcount != 1:
             return jsonify(error="Shop ID not found."), 404
+=======
+>>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
 
     payload = {
         "shopId": shop_id,
@@ -856,8 +875,11 @@ def create_billing_pass(shop_id):
         shopId=shop_id,
         action=action,
         paidUntil=paid_until,
+<<<<<<< HEAD
         billingPaused=billing_paused,
         isPaused=billing_paused,
+=======
+>>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
         code=f"KGS1.{encoded_payload}.{signature}",
     )
 

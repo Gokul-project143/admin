@@ -193,7 +193,11 @@
         <td>${escapeHtml(shop.assignedVersion || "—")}</td>
         <td><button class="button secondary rotate-token" data-shop-id="${escapeHtml(shop.shopId)}" type="button">Rotate token</button></td>
         <td class="row-actions">
+<<<<<<< HEAD
           <button class="button ${isPaused ? "danger" : "secondary"} billing-pass" data-shop-id="${escapeHtml(shop.shopId)}" data-paused="${isPaused ? "true" : "false"}" type="button">${isPaused ? "Resume Billing" : "Pause Billing"}</button>
+=======
+          <button class="button secondary billing-pass" data-shop-id="${escapeHtml(shop.shopId)}" type="button">Pass / Pause Billing</button>
+>>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
           <button class="button secondary edit-shop" data-shop-id="${escapeHtml(shop.shopId)}" data-shop-name="${escapeHtml(shop.shopName)}" type="button">Edit</button>
           <button class="button danger delete-shop" data-shop-id="${escapeHtml(shop.shopId)}" type="button">Delete</button>
         </td>`;
@@ -364,8 +368,18 @@
     }
     if (button.classList.contains("billing-pass")) {
       const shopId = button.dataset.shopId;
+<<<<<<< HEAD
       const currentlyPaused = button.dataset.paused === "true";
       const normalizedAction = currentlyPaused ? "RESUME" : "PAUSE";
+=======
+      const action = window.prompt(`Enter PAUSE or RESUME for ${shopId}:`, "PAUSE");
+      if (action === null) return;
+      const normalizedAction = action.trim().toUpperCase();
+      if (!["PAUSE", "RESUME"].includes(normalizedAction)) {
+        showNotice("Action must be PAUSE or RESUME.", true);
+        return;
+      }
+>>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
       let paidUntil = "";
       if (normalizedAction === "PAUSE") {
         const answer = window.prompt("Optional paid-until date (YYYY-MM-DD):", "");
@@ -379,7 +393,10 @@
           body: JSON.stringify({ action: normalizedAction, paidUntil }),
         });
         showOfflinePassCode(shopId, result.code);
+<<<<<<< HEAD
         await loadShops();
+=======
+>>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
         showNotice(`Offline ${normalizedAction.toLowerCase()} code generated for ${shopId}.`);
       } catch (error) {
         showNotice(error.message, true);

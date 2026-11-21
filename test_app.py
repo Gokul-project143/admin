@@ -95,8 +95,11 @@ class DashboardApiTests(unittest.TestCase):
         script = self.client.get("/app.js")
         self.assertIn(b"/api/admin/shops", script.data)
         self.assertIn(b"billing-pass", script.data)
+<<<<<<< HEAD
         self.assertIn(b"Resume Billing", script.data)
         self.assertIn(b"Pause Billing", script.data)
+=======
+>>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
         script.close()
 
     def _create_shop(self, shop_id):
@@ -328,6 +331,7 @@ class DashboardApiTests(unittest.TestCase):
         ).hexdigest()
         self.assertTrue(hmac.compare_digest(signature, expected))
         self.assertEqual(result["paidUntil"], "2027-01-31")
+<<<<<<< HEAD
         self.assertTrue(result["billingPaused"])
         self.assertTrue(result["isPaused"])
 
@@ -363,6 +367,8 @@ class DashboardApiTests(unittest.TestCase):
         listed_shop = next(shop for shop in listed["shops"] if shop["shopId"] == "SHOP-001")
         self.assertFalse(listed_shop["billingPaused"])
         self.assertFalse(listed_shop["isPaused"])
+=======
+>>>>>>> 36576d83fca0a927bf3b1338107c0336501a1447
 
         invalid_action = self.client.post(
             "/api/admin/shops/SHOP-001/billing-pass",
