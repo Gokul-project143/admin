@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
 
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import yaml
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request, send_from_directory
@@ -47,6 +49,26 @@ def _resolve_public_base_url(configured_url, port):
     return configured_url or f"http://127.0.0.1:{port}"
 
 
+def _normalize_database_url(value):
+    value = (value or "").strip()
+    if not value:
+        return ""
+    value = re.sub(r"^postgres(?:ql)?://", "postgresql://", value, flags=re.IGNORECASE)
+    parsed = urllib.parse.urlsplit(value)
+    if (parsed.hostname or "").lower().endswith(".neon.tech"):
+        query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        query = [(key, item) for key, item in query if key.lower() != "sslmode"]
+        query.append(("sslmode", "require"))
+        value = urllib.parse.urlunsplit((
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            urllib.parse.urlencode(query),
+            parsed.fragment,
+        ))
+    return value
+
+
 def _usable_public_base_url(value):
     try:
         parsed = urllib.parse.urlsplit(value)
@@ -60,6 +82,7 @@ def _usable_public_base_url(value):
 
 _load_environment()
 SERVER_PORT = _server_port(os.environ.get("PORT", str(DEFAULT_SERVER_PORT)))
+DATABASE_URL = _normalize_database_url(os.environ.get("DATABASE_URL"))
 DATABASE_PATH = Path(os.environ.get("DATABASE_PATH", ROOT / "data" / "monitoring.sqlite3"))
 ADMIN_API_TOKEN = os.environ.get("ADMIN_API_TOKEN", "").strip()
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
@@ -113,7 +136,35 @@ def _log_startup_configuration():
         )
 
 
+class _PostgresConnection:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def execute(self, query, parameters=()):
+        cursor = self.connection.cursor()
+        cursor.execute(query.replace("?", "%s"), parameters)
+        return cursor
+
+    def executemany(self, query, parameters):
+        cursor = self.connection.cursor()
+        cursor.executemany(query.replace("?", "%s"), parameters)
+        return cursor
+
+    def commit(self):
+        self.connection.commit()
+
+    def rollback(self):
+        self.connection.rollback()
+
+    def close(self):
+        self.connection.close()
+
+
 def _connect():
+    if DATABASE_URL:
+        return _PostgresConnection(
+            psycopg2.connect(DATABASE_URL, connect_timeout=15, cursor_factory=RealDictCursor)
+        )
     DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DATABASE_PATH, timeout=15)
     connection.row_factory = sqlite3.Row
@@ -126,45 +177,91 @@ def _connect():
 def _database():
     db = _connect()
     try:
-        with db:
-            yield db
+        yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
 
 def _initialize_database():
     with _database() as db:
-        db.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS shops (
-                shop_id TEXT PRIMARY KEY,
-                shop_name TEXT NOT NULL,
-                token_hash TEXT NOT NULL UNIQUE,
-                current_version TEXT NOT NULL DEFAULT '',
-                last_seen TEXT,
-                created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS releases (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                version TEXT NOT NULL UNIQUE,
-                tag_name TEXT NOT NULL UNIQUE,
-                notes TEXT NOT NULL,
-                github_release_id INTEGER NOT NULL,
-                github_html_url TEXT NOT NULL,
-                installer_name TEXT NOT NULL,
-                installer_asset_id INTEGER NOT NULL,
-                installer_sha512 TEXT NOT NULL,
-                installer_size INTEGER NOT NULL,
-                manifest_text TEXT NOT NULL,
-                published_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS assignments (
-                shop_id TEXT PRIMARY KEY REFERENCES shops(shop_id) ON DELETE CASCADE,
-                release_id INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
-                assigned_at TEXT NOT NULL
-            );
-            """
-        )
+        if DATABASE_URL:
+            statements = (
+                """
+                CREATE TABLE IF NOT EXISTS shops (
+                    shop_id TEXT PRIMARY KEY,
+                    shop_name TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    current_version TEXT NOT NULL DEFAULT '',
+                    last_seen TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS releases (
+                    id SERIAL PRIMARY KEY,
+                    version TEXT NOT NULL UNIQUE,
+                    tag_name TEXT NOT NULL UNIQUE,
+                    notes TEXT NOT NULL,
+                    github_release_id BIGINT NOT NULL,
+                    github_html_url TEXT NOT NULL,
+                    installer_name TEXT NOT NULL,
+                    installer_asset_id BIGINT NOT NULL,
+                    installer_sha512 TEXT NOT NULL,
+                    installer_size BIGINT NOT NULL,
+                    manifest_text TEXT NOT NULL,
+                    published_at TIMESTAMPTZ NOT NULL
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS assignments (
+                    shop_id TEXT PRIMARY KEY REFERENCES shops(shop_id) ON DELETE CASCADE,
+                    release_id INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+                    assigned_at TIMESTAMPTZ NOT NULL
+                )
+                """,
+            )
+        else:
+            statements = (
+                """
+                CREATE TABLE IF NOT EXISTS shops (
+                    shop_id TEXT PRIMARY KEY,
+                    shop_name TEXT NOT NULL,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    current_version TEXT NOT NULL DEFAULT '',
+                    last_seen TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS releases (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    version TEXT NOT NULL UNIQUE,
+                    tag_name TEXT NOT NULL UNIQUE,
+                    notes TEXT NOT NULL,
+                    github_release_id INTEGER NOT NULL,
+                    github_html_url TEXT NOT NULL,
+                    installer_name TEXT NOT NULL,
+                    installer_asset_id INTEGER NOT NULL,
+                    installer_sha512 TEXT NOT NULL,
+                    installer_size INTEGER NOT NULL,
+                    manifest_text TEXT NOT NULL,
+                    published_at TEXT NOT NULL
+                )
+                """,
+                """
+                CREATE TABLE IF NOT EXISTS assignments (
+                    shop_id TEXT PRIMARY KEY REFERENCES shops(shop_id) ON DELETE CASCADE,
+                    release_id INTEGER NOT NULL REFERENCES releases(id) ON DELETE CASCADE,
+                    assigned_at TEXT NOT NULL
+                )
+                """,
+            )
+        for statement in statements:
+            db.execute(statement)
 
 
 def _now():
@@ -510,20 +607,25 @@ def list_shops():
             FROM shops s
             LEFT JOIN assignments a ON a.shop_id = s.shop_id
             LEFT JOIN releases r ON r.id = a.release_id
-            ORDER BY s.shop_name COLLATE NOCASE
+            ORDER BY LOWER(s.shop_name)
             """
         ).fetchall()
     shops = []
     for row in rows:
+        last_seen = row["last_seen"]
         try:
-            seen = datetime.fromisoformat(row["last_seen"]).timestamp() if row["last_seen"] else 0
+            seen = (
+                last_seen.timestamp()
+                if isinstance(last_seen, datetime)
+                else datetime.fromisoformat(last_seen).timestamp() if last_seen else 0
+            )
         except ValueError:
             seen = 0
         shops.append({
             "shopId": row["shop_id"],
             "shopName": row["shop_name"],
             "currentVersion": row["current_version"],
-            "lastSeen": row["last_seen"],
+            "lastSeen": last_seen.isoformat(timespec="seconds") if isinstance(last_seen, datetime) else last_seen,
             "online": seen >= cutoff,
             "assignedVersion": row["assigned_version"],
         })
@@ -556,7 +658,7 @@ def create_shop():
                 "INSERT INTO shops (shop_id, shop_name, token_hash, created_at) VALUES (?, ?, ?, ?)",
                 (shop_id, shop_name, token_hash, _now()),
             )
-    except sqlite3.IntegrityError:
+    except (sqlite3.IntegrityError, psycopg2.IntegrityError):
         return jsonify(error="That Shop ID already exists."), 409
     return jsonify(
         shopId=shop_id,
@@ -570,6 +672,37 @@ def create_shop():
         },
         warning="Copy this token now. It cannot be retrieved later.",
     ), 201
+
+
+@app.put("/api/admin/shops/<shop_id>")
+def update_shop(shop_id):
+    unauthorized = _require_admin()
+    if unauthorized:
+        return unauthorized
+    body = request.get_json(silent=True) or {}
+    shop_name = str(body.get("shopName", "")).strip()
+    if not shop_name or len(shop_name) > 120:
+        return jsonify(error="Provide a Shop Name of at most 120 characters."), 400
+    with _database() as db:
+        cursor = db.execute(
+            "UPDATE shops SET shop_name = ? WHERE shop_id = ?",
+            (shop_name, shop_id),
+        )
+    if cursor.rowcount != 1:
+        return jsonify(error="Shop ID not found."), 404
+    return jsonify(shopId=shop_id, shopName=shop_name)
+
+
+@app.delete("/api/admin/shops/<shop_id>")
+def delete_shop(shop_id):
+    unauthorized = _require_admin()
+    if unauthorized:
+        return unauthorized
+    with _database() as db:
+        cursor = db.execute("DELETE FROM shops WHERE shop_id = ?", (shop_id,))
+    if cursor.rowcount != 1:
+        return jsonify(error="Shop ID not found."), 404
+    return jsonify(deleted=True, shopId=shop_id)
 
 
 @app.post("/api/admin/shops/<shop_id>/rotate-token")
@@ -618,6 +751,18 @@ def list_releases():
             """
         ).fetchall()
     return jsonify(releases=[dict(row) for row in rows])
+
+
+@app.delete("/api/admin/releases/<int:release_id>")
+def delete_release(release_id):
+    unauthorized = _require_admin()
+    if unauthorized:
+        return unauthorized
+    with _database() as db:
+        cursor = db.execute("DELETE FROM releases WHERE id = ?", (release_id,))
+    if cursor.rowcount != 1:
+        return jsonify(error="Release ID not found."), 404
+    return jsonify(deleted=True, releaseId=release_id)
 
 
 @app.get("/api/admin/releases/progress/<upload_id>")
@@ -719,7 +864,7 @@ def publish_release():
             "draft": False,
         })
         with _database() as db:
-            cursor = db.execute(
+            db.execute(
                 """
                 INSERT INTO releases
                     (version, tag_name, notes, github_release_id, github_html_url,
@@ -734,7 +879,10 @@ def publish_release():
                     manifest_bytes.decode("utf-8"), _now(),
                 ),
             )
-            release_id = cursor.lastrowid
+            release_id = db.execute(
+                "SELECT id FROM releases WHERE version = ?",
+                (version,),
+            ).fetchone()["id"]
     except Exception as error:
         if upload_id:
             _set_upload_progress(upload_id, "failed", message="Release upload failed.")
@@ -743,7 +891,7 @@ def publish_release():
                 _github_request("DELETE", f"/repos/{GITHUB_REPOSITORY}/releases/{draft['id']}")
             except Exception:
                 app.logger.exception("Failed to remove incomplete GitHub draft release %s", draft["id"])
-        if isinstance(error, sqlite3.IntegrityError):
+        if isinstance(error, (sqlite3.IntegrityError, psycopg2.IntegrityError)):
             return jsonify(error="That release version or tag has already been published."), 409
         app.logger.exception("GitHub release publishing failed")
         return jsonify(error=str(error)), 502
@@ -869,6 +1017,8 @@ def heartbeat():
             (shop["shop_id"],),
         ).fetchone()
         stored_last_seen = stored_heartbeat["last_seen"] if stored_heartbeat else None
+        if isinstance(stored_last_seen, datetime):
+            stored_last_seen = stored_last_seen.isoformat(timespec="seconds")
         print(
             f"--> [DEBUG] SQLite last_seen for shop_id: {shop['shop_id']} is {stored_last_seen}",
             flush=True,

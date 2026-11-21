@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 _test_database_directory = tempfile.TemporaryDirectory()
 os.environ["DATABASE_PATH"] = str(Path(_test_database_directory.name) / "monitoring.sqlite3")
+os.environ["DATABASE_URL"] = ""
 
 import app as dashboard_app
 
@@ -158,6 +159,21 @@ class DashboardApiTests(unittest.TestCase):
         self.assertFalse(dashboard_app._usable_public_base_url("http://updates.example.com"))
         self.assertFalse(dashboard_app._usable_public_base_url("http://127.0.0.1:invalid"))
 
+    def test_database_url_is_normalized_and_neon_requires_ssl(self):
+        neon_url = dashboard_app._normalize_database_url(
+            "Postgresql://user:password@ep-example.neon.tech/app?sslmode=disable&connect_timeout=10"
+        )
+        parsed = dashboard_app.urllib.parse.urlsplit(neon_url)
+        query = dashboard_app.urllib.parse.parse_qs(parsed.query)
+        self.assertEqual(parsed.scheme, "postgresql")
+        self.assertEqual(query["sslmode"], ["require"])
+        self.assertEqual(query["connect_timeout"], ["10"])
+        self.assertEqual(
+            dashboard_app._normalize_database_url("postgres://user:password@localhost/app"),
+            "postgresql://user:password@localhost/app",
+        )
+        self.assertEqual(dashboard_app._normalize_database_url(""), "")
+
     def test_missing_optional_configuration_logs_warnings_without_secrets(self):
         with patch.object(dashboard_app, "ADMIN_API_TOKEN", ""), \
                 patch.object(dashboard_app, "GITHUB_TOKEN", ""), \
@@ -287,6 +303,27 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(old_token_response.status_code, 401)
         self.assertEqual(new_token_response.status_code, 200)
 
+    def test_shop_can_be_edited_and_deleted(self):
+        self._create_shop("SHOP-001")
+        updated = self.client.put(
+            "/api/admin/shops/SHOP-001",
+            headers=self.admin_headers,
+            json={"shopName": "Renamed Shop"},
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.get_json()["shopName"], "Renamed Shop")
+
+        deleted = self.client.delete(
+            "/api/admin/shops/SHOP-001",
+            headers=self.admin_headers,
+        )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.get_json()["shopId"], "SHOP-001")
+        self.assertEqual(
+            self.client.get("/api/admin/shops", headers=self.admin_headers).get_json()["total"],
+            0,
+        )
+
     def test_authenticated_token_for_deleted_shop_does_not_succeed_silently(self):
         with patch.object(dashboard_app, "_shop_from_token", return_value={"shop_id": "MISSING"}):
             response = self.client.post(
@@ -374,6 +411,28 @@ class DashboardApiTests(unittest.TestCase):
             headers={"Authorization": f"Bearer {second_token}"},
         )
         self.assertEqual(denied_feed.status_code, 404)
+
+    def test_deleting_release_removes_its_shop_assignment(self):
+        self._create_shop("SHOP-001")
+        release_id = self._create_release()
+        assigned = self.client.post(
+            "/api/admin/push",
+            headers=self.admin_headers,
+            json={"releaseId": release_id, "shopIds": ["SHOP-001"]},
+        )
+        self.assertEqual(assigned.status_code, 200)
+
+        deleted = self.client.delete(
+            f"/api/admin/releases/{release_id}",
+            headers=self.admin_headers,
+        )
+        self.assertEqual(deleted.status_code, 200)
+        with dashboard_app._database() as db:
+            assignment = db.execute(
+                "SELECT 1 FROM assignments WHERE release_id = ?",
+                (release_id,),
+            ).fetchone()
+        self.assertIsNone(assignment)
 
     def test_release_publish_generates_a_hash_manifest_and_rejects_non_installers(self):
         rejected = self.client.post(
