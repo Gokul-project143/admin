@@ -676,12 +676,22 @@ def list_shops():
             )
         except ValueError:
             seen = 0
+        is_online = seen >= cutoff
+        current_version = row["current_version"]
+        last_heartbeat = (
+            last_seen.isoformat(timespec="seconds")
+            if isinstance(last_seen, datetime)
+            else last_seen
+        )
         shops.append({
             "shopId": row["shop_id"],
             "shopName": row["shop_name"],
-            "currentVersion": row["current_version"],
-            "lastSeen": last_seen.isoformat(timespec="seconds") if isinstance(last_seen, datetime) else last_seen,
-            "online": seen >= cutoff,
+            "currentVersion": current_version,
+            "installedVersion": current_version,
+            "lastSeen": last_heartbeat,
+            "lastHeartbeat": last_heartbeat,
+            "online": is_online,
+            "status": "Online" if is_online else "Offline",
             "assignedVersion": row["assigned_version"],
             "billingPaused": bool(row["billing_paused"]),
             "isPaused": bool(row["billing_paused"]),
@@ -1186,7 +1196,9 @@ def heartbeat():
         )
         return jsonify(error="Unknown or invalid shop credential."), 401
 
-    version_value = body.get("version")
+    version_value = body.get("installed_version")
+    if not isinstance(version_value, str) or not version_value.strip():
+        version_value = body.get("version")
     version = version_value.strip()[:64] if isinstance(version_value, str) else ""
     if supplied_id != shop["shop_id"] or not version:
         app.logger.warning(

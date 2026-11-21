@@ -346,6 +346,38 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(old_token_response.status_code, 401)
         self.assertEqual(new_token_response.status_code, 200)
 
+    def test_installed_version_heartbeat_refreshes_registered_shop_row(self):
+        token = self._create_shop("SHOP-UPDATED")
+        response = self.client.post(
+            "/api/heartbeat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "shopId": "SHOP-UPDATED",
+                "status": "online",
+                "installed_version": "1.1.1",
+                "version": "1.0.0",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        with dashboard_app._database() as db:
+            row = db.execute(
+                "SELECT current_version, last_seen FROM shops WHERE shop_id = ?",
+                ("SHOP-UPDATED",),
+            ).fetchone()
+        self.assertEqual(row["current_version"], "1.1.1")
+        self.assertIsNotNone(row["last_seen"])
+
+        listed = self.client.get(
+            "/api/admin/shops", headers=self.admin_headers
+        ).get_json()
+        shop = next(item for item in listed["shops"] if item["shopId"] == "SHOP-UPDATED")
+        self.assertEqual(shop["installedVersion"], "1.1.1")
+        self.assertEqual(shop["currentVersion"], "1.1.1")
+        self.assertEqual(shop["status"], "Online")
+        self.assertTrue(shop["online"])
+        self.assertEqual(shop["lastHeartbeat"], shop["lastSeen"])
+
     def test_billing_pass_codes_are_signed_for_the_shop_and_validate_action(self):
         registration = self.client.post(
             "/api/admin/shops",
