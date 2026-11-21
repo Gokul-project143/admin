@@ -13,7 +13,12 @@
   const uploadProgressPercent = document.getElementById("release-upload-percent");
   const uploadProgressSpeed = document.getElementById("release-upload-speed");
   const uploadProgressEta = document.getElementById("release-upload-eta");
+  const shopsSearch = document.getElementById("shops-search");
+  const releasesSearch = document.getElementById("releases-search");
+  let shops = [];
   let releases = [];
+  const selectedShops = new Set();
+  let selectedReleaseId = null;
   let lastShopConfig = null;
 
   tokenInput.value = sessionStorage.getItem("adminToken") || "";
@@ -127,11 +132,18 @@
   }
 
   function selectedShopIds() {
-    return [...document.querySelectorAll(".shop-select:checked")].map((checkbox) => checkbox.value);
+    return [...selectedShops];
   }
 
   function updatePushButton() {
-    pushButton.disabled = selectedShopIds().length === 0 || !document.querySelector(".release-select:checked");
+    pushButton.disabled = selectedShopIds().length === 0 || !selectedReleaseId;
+  }
+
+  function updateSelectAllState() {
+    const checkboxes = [...document.querySelectorAll(".shop-select")];
+    const selectedCount = checkboxes.filter((checkbox) => selectedShops.has(checkbox.value)).length;
+    selectAll.checked = checkboxes.length > 0 && selectedCount === checkboxes.length;
+    selectAll.indeterminate = selectedCount > 0 && selectedCount < checkboxes.length;
   }
 
   async function loadShops() {
@@ -140,48 +152,92 @@
     document.getElementById("online-count").textContent = data.online;
     document.getElementById("offline-count").textContent = data.offline;
     document.getElementById("online-window").textContent = `${Math.round(data.onlineWindowSeconds / 60)} min`;
+    shops = data.shops;
+    const shopIds = new Set(shops.map((shop) => shop.shopId));
+    for (const shopId of selectedShops) {
+      if (!shopIds.has(shopId)) selectedShops.delete(shopId);
+    }
+    renderShops();
+  }
+
+  function renderShops() {
     shopsBody.replaceChildren();
-    if (!data.shops.length) {
-      shopsBody.innerHTML = '<tr><td colspan="8" class="empty">No shops registered yet.</td></tr>';
+    if (!shops.length) {
+      shopsBody.innerHTML = '<tr><td colspan="9" class="empty">No shops registered yet.</td></tr>';
+      updateSelectAllState();
       updatePushButton();
       return;
     }
-    for (const shop of data.shops) {
+    const query = shopsSearch.value.trim().toLocaleLowerCase();
+    const visibleShops = shops.filter((shop) => [
+      shop.shopId,
+      shop.shopName,
+      shop.currentVersion || "",
+      shop.online ? "online" : "offline",
+    ].some((value) => String(value).toLocaleLowerCase().includes(query)));
+    if (!visibleShops.length) {
+      shopsBody.innerHTML = '<tr><td colspan="9" class="empty">No shops match this search.</td></tr>';
+      updateSelectAllState();
+      updatePushButton();
+      return;
+    }
+    for (const shop of visibleShops) {
       const row = document.createElement("tr");
       row.innerHTML = `
-        <td><input class="shop-select" type="checkbox" value="${escapeHtml(shop.shopId)}" aria-label="Select ${escapeHtml(shop.shopName)}"></td>
+        <td><input class="shop-select" type="checkbox" value="${escapeHtml(shop.shopId)}" aria-label="Select ${escapeHtml(shop.shopName)}" ${selectedShops.has(shop.shopId) ? "checked" : ""}></td>
         <td>${escapeHtml(shop.shopId)}</td><td>${escapeHtml(shop.shopName)}</td>
         <td>${escapeHtml(shop.currentVersion || "—")}</td>
         <td><span class="badge ${shop.online ? "online" : "offline"}">${shop.online ? "Online" : "Offline"}</span></td>
         <td>${escapeHtml(formatDate(shop.lastSeen))}</td>
         <td>${escapeHtml(shop.assignedVersion || "—")}</td>
-        <td><button class="button secondary rotate-token" data-shop-id="${escapeHtml(shop.shopId)}" type="button">Rotate token</button></td>`;
+        <td><button class="button secondary rotate-token" data-shop-id="${escapeHtml(shop.shopId)}" type="button">Rotate token</button></td>
+        <td class="row-actions">
+          <button class="button secondary edit-shop" data-shop-id="${escapeHtml(shop.shopId)}" data-shop-name="${escapeHtml(shop.shopName)}" type="button">Edit</button>
+          <button class="button danger delete-shop" data-shop-id="${escapeHtml(shop.shopId)}" type="button">Delete</button>
+        </td>`;
       shopsBody.append(row);
     }
-    document.querySelectorAll(".shop-select").forEach((checkbox) => checkbox.addEventListener("change", updatePushButton));
-    selectAll.checked = false;
+    updateSelectAllState();
     updatePushButton();
   }
 
   async function loadReleases() {
     const data = await api("/api/admin/releases");
     releases = data.releases;
+    if (!releases.some((release) => String(release.id) === selectedReleaseId)) {
+      selectedReleaseId = null;
+    }
+    renderReleases();
+  }
+
+  function renderReleases() {
     releasesBody.replaceChildren();
     if (!releases.length) {
-      releasesBody.innerHTML = '<tr><td colspan="6" class="empty">No releases published yet.</td></tr>';
+      releasesBody.innerHTML = '<tr><td colspan="7" class="empty">No releases published yet.</td></tr>';
       updatePushButton();
       return;
     }
-    for (const release of releases) {
+    const query = releasesSearch.value.trim().toLocaleLowerCase();
+    const visibleReleases = releases.filter((release) => [
+      release.version,
+      release.tag_name,
+      release.notes || "",
+    ].some((value) => String(value).toLocaleLowerCase().includes(query)));
+    if (!visibleReleases.length) {
+      releasesBody.innerHTML = '<tr><td colspan="7" class="empty">No releases match this search.</td></tr>';
+      updatePushButton();
+      return;
+    }
+    for (const release of visibleReleases) {
       const row = document.createElement("tr");
       row.innerHTML = `
-        <td><input class="release-select" type="radio" name="release" value="${release.id}" aria-label="Select release ${escapeHtml(release.version)}"></td>
+        <td><input class="release-select" type="radio" name="release" value="${release.id}" aria-label="Select release ${escapeHtml(release.version)}" ${String(release.id) === selectedReleaseId ? "checked" : ""}></td>
         <td>${escapeHtml(release.version)}</td><td>${escapeHtml(release.tag_name)}</td>
         <td><a href="${escapeHtml(release.github_html_url)}" target="_blank" rel="noopener noreferrer">Open</a></td>
-        <td>${escapeHtml(formatDate(release.published_at))}</td><td>${release.target_count}</td>`;
+        <td>${escapeHtml(formatDate(release.published_at))}</td><td>${release.target_count}</td>
+        <td><button class="button danger delete-release" data-release-id="${release.id}" data-release-version="${escapeHtml(release.version)}" type="button">Delete</button></td>`;
       releasesBody.append(row);
     }
-    document.querySelectorAll(".release-select").forEach((radio) => radio.addEventListener("change", updatePushButton));
     updatePushButton();
   }
 
@@ -219,7 +275,28 @@
     }
   });
   selectAll.addEventListener("change", () => {
-    document.querySelectorAll(".shop-select").forEach((checkbox) => { checkbox.checked = selectAll.checked; });
+    document.querySelectorAll(".shop-select").forEach((checkbox) => {
+      checkbox.checked = selectAll.checked;
+      if (checkbox.checked) selectedShops.add(checkbox.value);
+      else selectedShops.delete(checkbox.value);
+    });
+    updateSelectAllState();
+    updatePushButton();
+  });
+  shopsSearch.addEventListener("input", renderShops);
+  releasesSearch.addEventListener("input", renderReleases);
+  shopsBody.addEventListener("change", (event) => {
+    const checkbox = event.target instanceof Element ? event.target.closest(".shop-select") : null;
+    if (!checkbox) return;
+    if (checkbox.checked) selectedShops.add(checkbox.value);
+    else selectedShops.delete(checkbox.value);
+    updateSelectAllState();
+    updatePushButton();
+  });
+  releasesBody.addEventListener("change", (event) => {
+    const radio = event.target instanceof Element ? event.target.closest(".release-select") : null;
+    if (!radio) return;
+    selectedReleaseId = radio.value;
     updatePushButton();
   });
   document.getElementById("shop-form").addEventListener("submit", async (event) => {
@@ -246,8 +323,44 @@
   });
   shopsBody.addEventListener("click", async (event) => {
     const target = event.target instanceof Element ? event.target : event.target.parentElement;
-    const button = target && target.closest(".rotate-token");
+    const button = target && target.closest("button");
     if (!button) return;
+    if (button.classList.contains("edit-shop")) {
+      const shopId = button.dataset.shopId;
+      const shopName = window.prompt(`Edit the name for ${shopId}:`, button.dataset.shopName);
+      if (shopName === null || shopName.trim() === "") return;
+      button.disabled = true;
+      try {
+        await api(`/api/admin/shops/${encodeURIComponent(shopId)}`, {
+          method: "PUT",
+          body: JSON.stringify({ shopName }),
+        });
+        await loadShops();
+        showNotice(`${shopId} updated.`);
+      } catch (error) {
+        showNotice(error.message, true);
+      } finally {
+        button.disabled = false;
+      }
+      return;
+    }
+    if (button.classList.contains("delete-shop")) {
+      const shopId = button.dataset.shopId;
+      if (!window.confirm(`Delete ${shopId}? This also removes its assigned update and revokes its token.`)) return;
+      button.disabled = true;
+      try {
+        await api(`/api/admin/shops/${encodeURIComponent(shopId)}`, { method: "DELETE" });
+        selectedShops.delete(shopId);
+        await loadShops();
+        showNotice(`${shopId} deleted.`);
+      } catch (error) {
+        showNotice(error.message, true);
+      } finally {
+        button.disabled = false;
+      }
+      return;
+    }
+    if (!button.classList.contains("rotate-token")) return;
     if (!window.confirm(`Rotate the heartbeat/update token for ${button.dataset.shopId}? The old token stops working immediately.`)) return;
     button.disabled = true;
     try {
@@ -257,6 +370,25 @@
       });
       showShopConfig(result.clientConfig);
       showNotice(`${result.warning} Replace the config on that shop before its next heartbeat.`);
+    } catch (error) {
+      showNotice(error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  releasesBody.addEventListener("click", async (event) => {
+    const target = event.target instanceof Element ? event.target : event.target.parentElement;
+    const button = target && target.closest(".delete-release");
+    if (!button) return;
+    const releaseId = button.dataset.releaseId;
+    const version = button.dataset.releaseVersion;
+    if (!window.confirm(`Delete release ${version}? Its shop assignments will be cleared and the GitHub release/tag will also be removed when configured.`)) return;
+    button.disabled = true;
+    try {
+      await api(`/api/admin/releases/${encodeURIComponent(releaseId)}`, { method: "DELETE" });
+      if (selectedReleaseId === releaseId) selectedReleaseId = null;
+      await Promise.all([loadShops(), loadReleases()]);
+      showNotice(`Release ${version} deleted.`);
     } catch (error) {
       showNotice(error.message, true);
     } finally {
@@ -291,8 +423,8 @@
       });
       event.currentTarget.reset();
       await loadReleases();
-      const radio = document.querySelector(`.release-select[value="${CSS.escape(String(data.releaseId))}"]`);
-      if (radio) radio.checked = true;
+      selectedReleaseId = String(data.releaseId);
+      renderReleases();
       updatePushButton();
       renderUploadProgress(100, "Release published successfully.", 0, 0);
       showNotice(`${data.message} ${data.githubUrl}`);
@@ -306,7 +438,7 @@
     }
   });
   pushButton.addEventListener("click", async () => {
-    const releaseId = document.querySelector(".release-select:checked")?.value;
+    const releaseId = selectedReleaseId;
     const shopIds = selectedShopIds();
     if (!releaseId || !shopIds.length) return;
     if (!window.confirm(`Assign this update to ${shopIds.length} selected shop(s)?`)) return;

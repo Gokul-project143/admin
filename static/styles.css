@@ -31,6 +31,8 @@ main { max-width: 1240px; margin: 28px auto; padding: 0 20px; }
 .panel { margin-bottom: 18px; padding: 22px; }
 .section-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .section-heading h2 { margin-bottom: 12px; }
+.search-label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 12px; }
+.search-input { max-width: 420px; }
 .table-wrap { width: 100%; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; text-align: left; }
 th, td { padding: 11px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -49,6 +51,7 @@ textarea { resize: vertical; }
 .button:disabled { opacity: .5; cursor: not-allowed; }
 .button.primary { background: var(--blue); color: white; }
 .button.secondary { border: 1px solid #cbd5e1; background: white; color: var(--ink); }
+.button.danger { border: 1px solid #efb4b4; background: #fff5f5; color: var(--red); }
 .help { color: var(--muted); font-size: 13px; }
 .upload-progress { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; }
 .upload-progress[hidden] { display: none; }

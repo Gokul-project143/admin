@@ -422,17 +422,44 @@ class DashboardApiTests(unittest.TestCase):
         )
         self.assertEqual(assigned.status_code, 200)
 
-        deleted = self.client.delete(
-            f"/api/admin/releases/{release_id}",
-            headers=self.admin_headers,
-        )
+        with patch.object(dashboard_app, "GITHUB_TOKEN", ""), \
+                patch.object(dashboard_app, "GITHUB_REPOSITORY", ""):
+            deleted = self.client.delete(
+                "/api/admin/releases/1.1.0",
+                headers=self.admin_headers,
+            )
         self.assertEqual(deleted.status_code, 200)
+        self.assertFalse(deleted.get_json()["githubDeleted"])
         with dashboard_app._database() as db:
             assignment = db.execute(
                 "SELECT 1 FROM assignments WHERE release_id = ?",
                 (release_id,),
             ).fetchone()
         self.assertIsNone(assignment)
+
+    def test_release_delete_removes_matching_github_release_and_tag(self):
+        release_id = self._create_release()
+        with patch.object(dashboard_app, "GITHUB_TOKEN", "configured-token"), \
+                patch.object(dashboard_app, "GITHUB_REPOSITORY", "owner/repo"), \
+                patch.object(dashboard_app, "_github_request", return_value={}) as github_request:
+            response = self.client.delete(
+                f"/api/admin/releases/{release_id}",
+                headers=self.admin_headers,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["githubDeleted"])
+        self.assertEqual(github_request.call_count, 2)
+        self.assertEqual(
+            github_request.call_args_list[0].args[:2],
+            ("DELETE", "/repos/owner/repo/releases/15"),
+        )
+        self.assertEqual(
+            github_request.call_args_list[1].args[:2],
+            ("DELETE", "/repos/owner/repo/git/refs/tags/v1.1.0"),
+        )
+        self.assertTrue(github_request.call_args_list[0].kwargs["allow_not_found"])
+        self.assertTrue(github_request.call_args_list[1].kwargs["allow_not_found"])
 
     def test_release_publish_generates_a_hash_manifest_and_rejects_non_installers(self):
         rejected = self.client.post(

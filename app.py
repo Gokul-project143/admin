@@ -322,7 +322,14 @@ def _heartbeat_log_value(value):
     return f"<{type(value).__name__}>"
 
 
-def _github_request(method, path, payload=None, data=None, content_type="application/json"):
+def _github_request(
+    method,
+    path,
+    payload=None,
+    data=None,
+    content_type="application/json",
+    allow_not_found=False,
+):
     if not GITHUB_TOKEN:
         raise RuntimeError("GITHUB_TOKEN is not configured on the dashboard server.")
     url = path if path.startswith("https://") else f"{GITHUB_API}{path}"
@@ -343,6 +350,8 @@ def _github_request(method, path, payload=None, data=None, content_type="applica
             body = response.read()
             return json.loads(body) if body else {}
     except urllib.error.HTTPError as error:
+        if allow_not_found and error.code == 404:
+            return {}
         detail = error.read(2048).decode("utf-8", errors="replace")
         raise RuntimeError(f"GitHub API returned HTTP {error.code}: {detail}") from error
     except urllib.error.URLError as error:
@@ -753,16 +762,53 @@ def list_releases():
     return jsonify(releases=[dict(row) for row in rows])
 
 
-@app.delete("/api/admin/releases/<int:release_id>")
-def delete_release(release_id):
+@app.delete("/api/admin/releases/<release_identifier>")
+def delete_release(release_identifier):
     unauthorized = _require_admin()
     if unauthorized:
         return unauthorized
     with _database() as db:
-        cursor = db.execute("DELETE FROM releases WHERE id = ?", (release_id,))
-    if cursor.rowcount != 1:
-        return jsonify(error="Release ID not found."), 404
-    return jsonify(deleted=True, releaseId=release_id)
+        if release_identifier.isdecimal():
+            release = db.execute(
+                "SELECT id, version, tag_name, github_release_id FROM releases WHERE id = ?",
+                (int(release_identifier),),
+            ).fetchone()
+        else:
+            release = db.execute(
+                "SELECT id, version, tag_name, github_release_id FROM releases WHERE version = ? OR tag_name = ?",
+                (release_identifier, release_identifier),
+            ).fetchone()
+    if not release:
+        return jsonify(error="Release was not found."), 404
+
+    github_deleted = False
+    if GITHUB_TOKEN and GITHUB_REPOSITORY and REPOSITORY_PATTERN.fullmatch(GITHUB_REPOSITORY):
+        repository_path = f"/repos/{GITHUB_REPOSITORY}"
+        try:
+            _github_request(
+                "DELETE",
+                f"{repository_path}/releases/{release['github_release_id']}",
+                allow_not_found=True,
+            )
+            _github_request(
+                "DELETE",
+                f"{repository_path}/git/refs/tags/{urllib.parse.quote(release['tag_name'], safe='')}",
+                allow_not_found=True,
+            )
+            github_deleted = True
+        except RuntimeError as error:
+            app.logger.exception("Unable to delete GitHub release %s", release["tag_name"])
+            return jsonify(error=str(error)), 502
+
+    with _database() as db:
+        db.execute("DELETE FROM assignments WHERE release_id = ?", (release["id"],))
+        db.execute("DELETE FROM releases WHERE id = ?", (release["id"],))
+    return jsonify(
+        deleted=True,
+        releaseId=release["id"],
+        version=release["version"],
+        githubDeleted=github_deleted,
+    )
 
 
 @app.get("/api/admin/releases/progress/<upload_id>")
