@@ -19,7 +19,7 @@
   let releases = [];
   const selectedShops = new Set();
   let selectedReleaseId = null;
-  let lastShopConfig = null;
+  let lastCopyValue = null;
 
   tokenInput.value = sessionStorage.getItem("adminToken") || "";
 
@@ -182,6 +182,7 @@
       return;
     }
     for (const shop of visibleShops) {
+      const isPaused = Boolean(shop.billingPaused ?? shop.isPaused);
       const row = document.createElement("tr");
       row.innerHTML = `
         <td><input class="shop-select" type="checkbox" value="${escapeHtml(shop.shopId)}" aria-label="Select ${escapeHtml(shop.shopName)}" ${selectedShops.has(shop.shopId) ? "checked" : ""}></td>
@@ -192,6 +193,7 @@
         <td>${escapeHtml(shop.assignedVersion || "—")}</td>
         <td><button class="button secondary rotate-token" data-shop-id="${escapeHtml(shop.shopId)}" type="button">Rotate token</button></td>
         <td class="row-actions">
+          <button class="button ${isPaused ? "danger" : "secondary"} billing-pass" data-shop-id="${escapeHtml(shop.shopId)}" data-paused="${isPaused ? "true" : "false"}" type="button">${isPaused ? "Resume Billing" : "Pause Billing"}</button>
           <button class="button secondary edit-shop" data-shop-id="${escapeHtml(shop.shopId)}" data-shop-name="${escapeHtml(shop.shopName)}" type="button">Edit</button>
           <button class="button danger delete-shop" data-shop-id="${escapeHtml(shop.shopId)}" type="button">Delete</button>
         </td>`;
@@ -307,16 +309,16 @@
       showShopConfig(created.clientConfig);
       event.currentTarget.reset();
       await loadShops();
-      showNotice(`${created.shopName} registered. Copy the token now; it is only shown once.`);
+      showNotice(`${created.shopName} registered. Copy the full client config; it contains the one-time token and offline-pass secret.`);
     } catch (error) {
       showNotice(error.message, true);
     }
   });
   copyConfigButton.addEventListener("click", async () => {
-    if (!lastShopConfig) return;
+    if (!lastCopyValue) return;
     try {
-      await navigator.clipboard.writeText(JSON.stringify(lastShopConfig, null, 2));
-      showNotice("Shop config copied. Store it securely.");
+      await navigator.clipboard.writeText(lastCopyValue);
+      showNotice(lastCopyValue.startsWith("{") ? "Shop config copied. Store it securely." : "Offline code copied. Apply it in the shop app.");
     } catch (error) {
       showNotice(`Could not access clipboard: ${error.message}`, true);
     }
@@ -353,6 +355,32 @@
         selectedShops.delete(shopId);
         await loadShops();
         showNotice(`${shopId} deleted.`);
+      } catch (error) {
+        showNotice(error.message, true);
+      } finally {
+        button.disabled = false;
+      }
+      return;
+    }
+    if (button.classList.contains("billing-pass")) {
+      const shopId = button.dataset.shopId;
+      const currentlyPaused = button.dataset.paused === "true";
+      const normalizedAction = currentlyPaused ? "RESUME" : "PAUSE";
+      let paidUntil = "";
+      if (normalizedAction === "PAUSE") {
+        const answer = window.prompt("Optional paid-until date (YYYY-MM-DD):", "");
+        if (answer === null) return;
+        paidUntil = answer.trim();
+      }
+      button.disabled = true;
+      try {
+        const result = await api(`/api/admin/shops/${encodeURIComponent(shopId)}/billing-pass`, {
+          method: "POST",
+          body: JSON.stringify({ action: normalizedAction, paidUntil }),
+        });
+        showOfflinePassCode(shopId, result.code);
+        await loadShops();
+        showNotice(`Offline ${normalizedAction.toLowerCase()} code generated for ${shopId}.`);
       } catch (error) {
         showNotice(error.message, true);
       } finally {
@@ -463,9 +491,18 @@
   }
 
   function showShopConfig(config) {
-    lastShopConfig = config;
-    configOutput.textContent = JSON.stringify(config, null, 2);
+    lastCopyValue = JSON.stringify(config, null, 2);
+    configOutput.textContent = lastCopyValue;
     configOutput.hidden = false;
+    copyConfigButton.textContent = "Copy config JSON";
+    copyConfigButton.hidden = false;
+  }
+
+  function showOfflinePassCode(shopId, code) {
+    lastCopyValue = code;
+    configOutput.textContent = `Shop ID: ${shopId}\nOffline ${code.startsWith("KGS1.") ? "Pass / Unlock" : "Billing"} code:\n${code}`;
+    configOutput.hidden = false;
+    copyConfigButton.textContent = "Copy offline code";
     copyConfigButton.hidden = false;
   }
   window.setInterval(() => {

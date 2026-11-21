@@ -195,6 +195,9 @@ def _initialize_database():
                     shop_id TEXT PRIMARY KEY,
                     shop_name TEXT NOT NULL,
                     token_hash TEXT NOT NULL UNIQUE,
+                    offline_pass_secret TEXT NOT NULL DEFAULT '',
+                    billing_paused BOOLEAN NOT NULL DEFAULT 0,
+                    paid_until TEXT,
                     current_version TEXT NOT NULL DEFAULT '',
                     last_seen TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL
@@ -231,6 +234,9 @@ def _initialize_database():
                     shop_id TEXT PRIMARY KEY,
                     shop_name TEXT NOT NULL,
                     token_hash TEXT NOT NULL UNIQUE,
+                    offline_pass_secret TEXT NOT NULL DEFAULT '',
+                    billing_paused INTEGER NOT NULL DEFAULT 0,
+                    paid_until TEXT,
                     current_version TEXT NOT NULL DEFAULT '',
                     last_seen TEXT,
                     created_at TEXT NOT NULL
@@ -262,6 +268,45 @@ def _initialize_database():
             )
         for statement in statements:
             db.execute(statement)
+        if DATABASE_URL:
+            db.execute(
+                "ALTER TABLE shops ADD COLUMN IF NOT EXISTS "
+                "offline_pass_secret TEXT NOT NULL DEFAULT ''"
+            )
+            db.execute(
+                "ALTER TABLE shops ADD COLUMN IF NOT EXISTS "
+                "billing_paused BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+            db.execute(
+                "ALTER TABLE shops ADD COLUMN IF NOT EXISTS paid_until TEXT"
+            )
+        else:
+            columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(shops)")
+            }
+            if "offline_pass_secret" not in columns:
+                db.execute(
+                    "ALTER TABLE shops ADD COLUMN offline_pass_secret "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
+            columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(shops)")
+            }
+            if "billing_paused" not in columns:
+                db.execute(
+                    "ALTER TABLE shops ADD COLUMN billing_paused "
+                    "INTEGER NOT NULL DEFAULT 0"
+                )
+            if "paid_until" not in columns:
+                db.execute("ALTER TABLE shops ADD COLUMN paid_until TEXT")
+        rows = db.execute(
+            "SELECT shop_id FROM shops WHERE offline_pass_secret = ''"
+        ).fetchall()
+        for row in rows:
+            db.execute(
+                "UPDATE shops SET offline_pass_secret = ? WHERE shop_id = ?",
+                (secrets.token_urlsafe(32), row["shop_id"]),
+            )
 
 
 def _now():
@@ -612,6 +657,7 @@ def list_shops():
         rows = db.execute(
             """
             SELECT s.shop_id, s.shop_name, s.current_version, s.last_seen,
+                   s.billing_paused, s.paid_until,
                    a.release_id, r.version AS assigned_version
             FROM shops s
             LEFT JOIN assignments a ON a.shop_id = s.shop_id
@@ -637,6 +683,9 @@ def list_shops():
             "lastSeen": last_seen.isoformat(timespec="seconds") if isinstance(last_seen, datetime) else last_seen,
             "online": seen >= cutoff,
             "assignedVersion": row["assigned_version"],
+            "billingPaused": bool(row["billing_paused"]),
+            "isPaused": bool(row["billing_paused"]),
+            "paidUntil": row["paid_until"],
         })
     return jsonify(
         shops=shops,
@@ -660,12 +709,15 @@ def create_shop():
     if not SHOP_ID_PATTERN.fullmatch(shop_id) or not shop_name or len(shop_name) > 120:
         return jsonify(error="Provide a valid Shop ID (up to 64 safe characters) and Shop Name."), 400
     token = secrets.token_urlsafe(32)
+    offline_pass_secret = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     try:
         with _database() as db:
             db.execute(
-                "INSERT INTO shops (shop_id, shop_name, token_hash, created_at) VALUES (?, ?, ?, ?)",
-                (shop_id, shop_name, token_hash, _now()),
+                "INSERT INTO shops "
+                "(shop_id, shop_name, token_hash, offline_pass_secret, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (shop_id, shop_name, token_hash, offline_pass_secret, _now()),
             )
     except (sqlite3.IntegrityError, psycopg2.IntegrityError):
         return jsonify(error="That Shop ID already exists."), 409
@@ -678,8 +730,9 @@ def create_shop():
             "shopId": shop_id,
             "shopName": shop_name,
             "shopToken": token,
+            "offlinePassSecret": offline_pass_secret,
         },
-        warning="Copy this token now. It cannot be retrieved later.",
+        warning="Copy the client config now. It contains the one-time shop token and the offline pass secret.",
     ), 201
 
 
@@ -727,7 +780,7 @@ def rotate_shop_token(shop_id):
             (token_hash, shop_id),
         )
         shop = db.execute(
-            "SELECT shop_name FROM shops WHERE shop_id = ?",
+            "SELECT shop_name, offline_pass_secret FROM shops WHERE shop_id = ?",
             (shop_id,),
         ).fetchone()
     if cursor.rowcount != 1 or not shop:
@@ -740,8 +793,72 @@ def rotate_shop_token(shop_id):
             "shopId": shop_id,
             "shopName": shop["shop_name"],
             "shopToken": token,
+            "offlinePassSecret": shop["offline_pass_secret"],
         },
-        warning="The previous token is now invalid. Copy this token; it cannot be retrieved later.",
+        warning="The previous token is now invalid. Copy the replacement client config before closing this message.",
+    )
+
+
+@app.post("/api/admin/shops/<shop_id>/billing-pass")
+def create_billing_pass(shop_id):
+    unauthorized = _require_admin()
+    if unauthorized:
+        return unauthorized
+    body = request.get_json(silent=True) or {}
+    action = str(body.get("action", "")).strip().upper()
+    if action not in {"PAUSE", "RESUME"}:
+        return jsonify(error="Action must be PAUSE or RESUME."), 400
+    paid_until = body.get("paidUntil")
+    if action == "RESUME":
+        paid_until = None
+    elif paid_until not in (None, ""):
+        if not isinstance(paid_until, str):
+            return jsonify(error="paidUntil must be a date in YYYY-MM-DD format."), 400
+        try:
+            datetime.strptime(paid_until, "%Y-%m-%d")
+        except ValueError:
+            return jsonify(error="paidUntil must be a date in YYYY-MM-DD format."), 400
+    else:
+        paid_until = None
+
+    with _database() as db:
+        shop = db.execute(
+            "SELECT offline_pass_secret, billing_paused FROM shops WHERE shop_id = ?",
+            (shop_id,),
+        ).fetchone()
+    if not shop:
+        return jsonify(error="Shop ID not found."), 404
+    billing_paused = action == "PAUSE"
+    with _database() as db:
+        cursor = db.execute(
+            "UPDATE shops SET billing_paused = ?, paid_until = ? WHERE shop_id = ?",
+            (billing_paused, paid_until, shop_id),
+        )
+        if cursor.rowcount != 1:
+            return jsonify(error="Shop ID not found."), 404
+
+    payload = {
+        "shopId": shop_id,
+        "action": action,
+        "paidUntil": paid_until,
+        "issuedAt": time.time_ns(),
+        "nonce": secrets.token_urlsafe(12),
+    }
+    encoded_payload = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    signature = hmac.new(
+        shop["offline_pass_secret"].encode("utf-8"),
+        encoded_payload.encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return jsonify(
+        shopId=shop_id,
+        action=action,
+        paidUntil=paid_until,
+        billingPaused=billing_paused,
+        isPaused=billing_paused,
+        code=f"KGS1.{encoded_payload}.{signature}",
     )
 
 
@@ -1059,10 +1176,12 @@ def heartbeat():
             flush=True,
         )
         stored_heartbeat = db.execute(
-            "SELECT last_seen FROM shops WHERE shop_id = ?",
+            "SELECT last_seen, billing_paused, paid_until FROM shops WHERE shop_id = ?",
             (shop["shop_id"],),
         ).fetchone()
         stored_last_seen = stored_heartbeat["last_seen"] if stored_heartbeat else None
+        billing_paused = bool(stored_heartbeat["billing_paused"]) if stored_heartbeat else False
+        paid_until = stored_heartbeat["paid_until"] if stored_heartbeat else None
         if isinstance(stored_last_seen, datetime):
             stored_last_seen = stored_last_seen.isoformat(timespec="seconds")
         print(
@@ -1091,7 +1210,14 @@ def heartbeat():
             "version": assignment["version"],
             "notes": assignment["notes"],
         }
-    return jsonify(status="success", serverTime=last_seen, update=update), 200
+    return jsonify(
+        status="success",
+        serverTime=last_seen,
+        update=update,
+        billingPaused=billing_paused,
+        isPaused=billing_paused,
+        paidUntil=paid_until,
+    ), 200
 
 
 def _shop_has_release(shop, release_id):

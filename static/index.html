@@ -80,7 +80,7 @@
       <section class="panel">
         <p class="eyebrow">PROVISIONING</p>
         <h2>Register a shop</h2>
-        <p class="help">A unique bearer token is generated for each installation and shown once. Keep the token private and install its config in the shop’s Electron user-data folder.</p>
+        <p class="help">A unique heartbeat token and per-shop offline billing-pass secret are generated for each installation. Keep the config private and install it in the shop's Electron user-data folder. Use a shop-row Pass / Pause Billing action to create a signed code that works offline.</p>
         <form id="shop-form">
           <label>Shop ID <input name="shopId" required maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}" placeholder="SHOP-001"></label>
           <label>Shop name <input name="shopName" required maxlength="120" placeholder="Main Street Store"></label>
