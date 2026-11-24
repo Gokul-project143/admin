@@ -734,7 +734,6 @@ def list_shops():
             )
         except ValueError:
             seen = 0
-<<<<<<< HEAD
         is_online = (
             str(row["status"]).casefold() == "online" and seen >= cutoff
         )
@@ -745,11 +744,6 @@ def list_shops():
             else heartbeat_time
         )
         last_seen_value = (
-=======
-        is_online = seen >= cutoff
-        current_version = row["current_version"]
-        last_heartbeat = (
->>>>>>> a209a9c5bbf08ecc9809d7e66f37e781b83a234b
             last_seen.isoformat(timespec="seconds")
             if isinstance(last_seen, datetime)
             else last_seen
@@ -757,15 +751,9 @@ def list_shops():
         shops.append({
             "shopId": row["shop_id"],
             "shopName": row["shop_name"],
-<<<<<<< HEAD
             "currentVersion": installed_version,
             "installedVersion": installed_version,
             "lastSeen": last_seen_value,
-=======
-            "currentVersion": current_version,
-            "installedVersion": current_version,
-            "lastSeen": last_heartbeat,
->>>>>>> a209a9c5bbf08ecc9809d7e66f37e781b83a234b
             "lastHeartbeat": last_heartbeat,
             "online": is_online,
             "status": "Online" if is_online else "Offline",

@@ -387,7 +387,6 @@ class DashboardApiTests(unittest.TestCase):
 
         with dashboard_app._database() as db:
             row = db.execute(
-<<<<<<< HEAD
                 """
                 SELECT installed_version, current_version, last_heartbeat,
                        last_seen, status
@@ -400,13 +399,6 @@ class DashboardApiTests(unittest.TestCase):
         self.assertIsNotNone(row["last_heartbeat"])
         self.assertIsNotNone(row["last_seen"])
         self.assertEqual(row["status"], "Online")
-=======
-                "SELECT current_version, last_seen FROM shops WHERE shop_id = ?",
-                ("SHOP-UPDATED",),
-            ).fetchone()
-        self.assertEqual(row["current_version"], "1.1.1")
-        self.assertIsNotNone(row["last_seen"])
->>>>>>> a209a9c5bbf08ecc9809d7e66f37e781b83a234b
 
         listed = self.client.get(
             "/api/admin/shops", headers=self.admin_headers
