@@ -196,9 +196,19 @@ class DashboardApiTests(unittest.TestCase):
                 """
             )
             connection.execute(
-                "INSERT INTO shops (shop_id, shop_name, token_hash, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                ("SHOP-OLD", "Legacy Shop", "old-token-hash", "2026-01-01T00:00:00+00:00"),
+                """
+                INSERT INTO shops
+                    (shop_id, shop_name, token_hash, current_version, last_seen, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "SHOP-OLD",
+                    "Legacy Shop",
+                    "old-token-hash",
+                    "0.9.0",
+                    "2026-11-24T20:00:00+00:00",
+                    "2026-01-01T00:00:00+00:00",
+                ),
             )
             connection.commit()
             connection.close()
@@ -208,14 +218,22 @@ class DashboardApiTests(unittest.TestCase):
                 dashboard_app._initialize_database()
                 with dashboard_app._database() as db:
                     migrated = db.execute(
-                        "SELECT offline_pass_secret, billing_paused, paid_until "
-                        "FROM shops WHERE shop_id = ?",
+                        """
+                        SELECT offline_pass_secret, billing_paused, paid_until,
+                               installed_version, last_heartbeat, status
+                        FROM shops WHERE shop_id = ?
+                        """,
                         ("SHOP-OLD",),
                     ).fetchone()
 
         self.assertTrue(migrated["offline_pass_secret"])
         self.assertFalse(migrated["billing_paused"])
         self.assertIsNone(migrated["paid_until"])
+        self.assertEqual(migrated["installed_version"], "0.9.0")
+        self.assertEqual(
+            migrated["last_heartbeat"], "2026-11-24T20:00:00+00:00"
+        )
+        self.assertEqual(migrated["status"], "Online")
 
     def test_missing_optional_configuration_logs_warnings_without_secrets(self):
         with patch.object(dashboard_app, "ADMIN_API_TOKEN", ""), \
@@ -318,11 +336,18 @@ class DashboardApiTests(unittest.TestCase):
         )
         with dashboard_app._database() as db:
             updated_shop = db.execute(
-                "SELECT current_version, last_seen FROM shops WHERE shop_id = ?",
+                """
+                SELECT installed_version, current_version, last_heartbeat,
+                       last_seen, status
+                FROM shops WHERE shop_id = ?
+                """,
                 ("SHOP-001",),
             ).fetchone()
+        self.assertEqual(updated_shop["installed_version"], "1.0.0")
         self.assertEqual(updated_shop["current_version"], "1.0.0")
+        self.assertEqual(updated_shop["last_heartbeat"], heartbeat_result["serverTime"])
         self.assertEqual(updated_shop["last_seen"], heartbeat_result["serverTime"])
+        self.assertEqual(updated_shop["status"], "Online")
 
         shops = self.client.get("/api/admin/shops", headers=self.admin_headers).get_json()
         self.assertEqual((shops["total"], shops["online"], shops["offline"]), (1, 1, 0))
@@ -345,6 +370,45 @@ class DashboardApiTests(unittest.TestCase):
         )
         self.assertEqual(old_token_response.status_code, 401)
         self.assertEqual(new_token_response.status_code, 200)
+
+    def test_installed_version_heartbeat_refreshes_registered_shop_row(self):
+        token = self._create_shop("SHOP-UPDATED")
+        response = self.client.post(
+            "/api/heartbeat",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "shopId": "SHOP-UPDATED",
+                "status": "online",
+                "installed_version": "1.1.1",
+                "version": "1.0.0",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+
+        with dashboard_app._database() as db:
+            row = db.execute(
+                """
+                SELECT installed_version, current_version, last_heartbeat,
+                       last_seen, status
+                FROM shops WHERE shop_id = ?
+                """,
+                ("SHOP-UPDATED",),
+            ).fetchone()
+        self.assertEqual(row["installed_version"], "1.1.1")
+        self.assertEqual(row["current_version"], "1.1.1")
+        self.assertIsNotNone(row["last_heartbeat"])
+        self.assertIsNotNone(row["last_seen"])
+        self.assertEqual(row["status"], "Online")
+
+        listed = self.client.get(
+            "/api/admin/shops", headers=self.admin_headers
+        ).get_json()
+        shop = next(item for item in listed["shops"] if item["shopId"] == "SHOP-UPDATED")
+        self.assertEqual(shop["installedVersion"], "1.1.1")
+        self.assertEqual(shop["currentVersion"], "1.1.1")
+        self.assertEqual(shop["status"], "Online")
+        self.assertTrue(shop["online"])
+        self.assertEqual(shop["lastHeartbeat"], shop["lastSeen"])
 
     def test_billing_pass_codes_are_signed_for_the_shop_and_validate_action(self):
         registration = self.client.post(
@@ -816,9 +880,16 @@ class DashboardApiTests(unittest.TestCase):
         self.assertIsNone(offline.get_json()["serverTime"])
         with dashboard_app._database() as db:
             row = db.execute(
-                "SELECT last_seen FROM shops WHERE shop_id = ?", ("SHOP-003",)
+                """
+                SELECT installed_version, last_heartbeat, last_seen, status
+                FROM shops WHERE shop_id = ?
+                """,
+                ("SHOP-003",),
             ).fetchone()
         self.assertIsNone(row["last_seen"])
+        self.assertIsNotNone(row["last_heartbeat"])
+        self.assertEqual(row["installed_version"], "1.0.0")
+        self.assertEqual(row["status"], "Offline")
         shops = self.client.get("/api/admin/shops", headers=self.admin_headers).get_json()
         self.assertEqual((shops["online"], shops["offline"]), (0, 1))
 

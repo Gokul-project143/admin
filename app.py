@@ -198,6 +198,9 @@ def _initialize_database():
                     offline_pass_secret TEXT NOT NULL DEFAULT '',
                     billing_paused BOOLEAN NOT NULL DEFAULT FALSE,
                     paid_until TEXT,
+                    installed_version TEXT NOT NULL DEFAULT '',
+                    last_heartbeat TIMESTAMPTZ,
+                    status TEXT NOT NULL DEFAULT 'Offline',
                     current_version TEXT NOT NULL DEFAULT '',
                     last_seen TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL
@@ -237,6 +240,9 @@ def _initialize_database():
                     offline_pass_secret TEXT NOT NULL DEFAULT '',
                     billing_paused INTEGER NOT NULL DEFAULT 0,
                     paid_until TEXT,
+                    installed_version TEXT NOT NULL DEFAULT '',
+                    last_heartbeat TEXT,
+                    status TEXT NOT NULL DEFAULT 'Offline',
                     current_version TEXT NOT NULL DEFAULT '',
                     last_seen TEXT,
                     created_at TEXT NOT NULL
@@ -280,6 +286,17 @@ def _initialize_database():
             db.execute(
                 "ALTER TABLE shops ADD COLUMN IF NOT EXISTS paid_until TEXT"
             )
+            db.execute(
+                "ALTER TABLE shops ADD COLUMN IF NOT EXISTS "
+                "installed_version TEXT NOT NULL DEFAULT ''"
+            )
+            db.execute(
+                "ALTER TABLE shops ADD COLUMN IF NOT EXISTS last_heartbeat TIMESTAMPTZ"
+            )
+            db.execute(
+                "ALTER TABLE shops ADD COLUMN IF NOT EXISTS "
+                "status TEXT NOT NULL DEFAULT 'Offline'"
+            )
         else:
             columns = {
                 row["name"] for row in db.execute("PRAGMA table_info(shops)")
@@ -299,6 +316,43 @@ def _initialize_database():
                 )
             if "paid_until" not in columns:
                 db.execute("ALTER TABLE shops ADD COLUMN paid_until TEXT")
+            columns = {
+                row["name"] for row in db.execute("PRAGMA table_info(shops)")
+            }
+            if "installed_version" not in columns:
+                db.execute(
+                    "ALTER TABLE shops ADD COLUMN installed_version "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
+            if "last_heartbeat" not in columns:
+                db.execute("ALTER TABLE shops ADD COLUMN last_heartbeat TEXT")
+            if "status" not in columns:
+                db.execute(
+                    "ALTER TABLE shops ADD COLUMN status "
+                    "TEXT NOT NULL DEFAULT 'Offline'"
+                )
+        db.execute(
+            """
+            UPDATE shops
+            SET installed_version = current_version
+            WHERE installed_version = '' AND current_version <> ''
+            """
+        )
+        db.execute(
+            """
+            UPDATE shops
+            SET last_heartbeat = last_seen
+            WHERE last_heartbeat IS NULL AND last_seen IS NOT NULL
+            """
+        )
+        db.execute(
+            """
+            UPDATE shops
+            SET status = CASE WHEN last_seen IS NULL THEN 'Offline' ELSE 'Online' END
+            WHERE status IS NULL OR status = ''
+               OR (status = 'Offline' AND last_seen IS NOT NULL)
+            """
+        )
         rows = db.execute(
             "SELECT shop_id FROM shops WHERE offline_pass_secret = ''"
         ).fetchall()
@@ -656,7 +710,8 @@ def list_shops():
     with _database() as db:
         rows = db.execute(
             """
-            SELECT s.shop_id, s.shop_name, s.current_version, s.last_seen,
+            SELECT s.shop_id, s.shop_name, s.installed_version,
+                   s.last_heartbeat, s.status, s.current_version, s.last_seen,
                    s.billing_paused, s.paid_until,
                    a.release_id, r.version AS assigned_version
             FROM shops s
@@ -668,20 +723,40 @@ def list_shops():
     shops = []
     for row in rows:
         last_seen = row["last_seen"]
+        heartbeat_time = row["last_heartbeat"] or last_seen
         try:
             seen = (
-                last_seen.timestamp()
-                if isinstance(last_seen, datetime)
-                else datetime.fromisoformat(last_seen).timestamp() if last_seen else 0
+                heartbeat_time.timestamp()
+                if isinstance(heartbeat_time, datetime)
+                else datetime.fromisoformat(heartbeat_time).timestamp()
+                if heartbeat_time
+                else 0
             )
         except ValueError:
             seen = 0
+        is_online = (
+            str(row["status"]).casefold() == "online" and seen >= cutoff
+        )
+        installed_version = row["installed_version"] or row["current_version"]
+        last_heartbeat = (
+            heartbeat_time.isoformat(timespec="seconds")
+            if isinstance(heartbeat_time, datetime)
+            else heartbeat_time
+        )
+        last_seen_value = (
+            last_seen.isoformat(timespec="seconds")
+            if isinstance(last_seen, datetime)
+            else last_seen
+        )
         shops.append({
             "shopId": row["shop_id"],
             "shopName": row["shop_name"],
-            "currentVersion": row["current_version"],
-            "lastSeen": last_seen.isoformat(timespec="seconds") if isinstance(last_seen, datetime) else last_seen,
-            "online": seen >= cutoff,
+            "currentVersion": installed_version,
+            "installedVersion": installed_version,
+            "lastSeen": last_seen_value,
+            "lastHeartbeat": last_heartbeat,
+            "online": is_online,
+            "status": "Online" if is_online else "Offline",
             "assignedVersion": row["assigned_version"],
             "billingPaused": bool(row["billing_paused"]),
             "isPaused": bool(row["billing_paused"]),
@@ -1186,7 +1261,9 @@ def heartbeat():
         )
         return jsonify(error="Unknown or invalid shop credential."), 401
 
-    version_value = body.get("version")
+    version_value = body.get("installed_version")
+    if not isinstance(version_value, str) or not version_value.strip():
+        version_value = body.get("version")
     version = version_value.strip()[:64] if isinstance(version_value, str) else ""
     if supplied_id != shop["shop_id"] or not version:
         app.logger.warning(
@@ -1203,12 +1280,26 @@ def heartbeat():
         isinstance(reported_status, str)
         and reported_status.strip().lower() == "offline"
     )
-    last_seen = None if going_offline else _now()
+    heartbeat_time = _now()
+    last_seen = None if going_offline else heartbeat_time
+    shop_status = "Offline" if going_offline else "Online"
 
     with _database() as db:
         cursor = db.execute(
-            "UPDATE shops SET current_version = ?, last_seen = ? WHERE shop_id = ?",
-            (version, last_seen, shop["shop_id"]),
+            """
+            UPDATE shops
+            SET installed_version = ?, current_version = ?,
+                last_heartbeat = ?, last_seen = ?, status = ?
+            WHERE shop_id = ?
+            """,
+            (
+                version,
+                version,
+                heartbeat_time,
+                last_seen,
+                shop_status,
+                shop["shop_id"],
+            ),
         )
         if cursor.rowcount != 1:
             db.rollback()
@@ -1222,20 +1313,30 @@ def heartbeat():
             return jsonify(error="Registered shop was not found while updating heartbeat."), 404
         db.commit()
         print(
-            f"--> [DEBUG] {'Offline report' if going_offline else 'Heartbeat'} successfully committed for shop_id: {shop['shop_id']} at {last_seen}",
+            f"--> [DEBUG] {'Offline report' if going_offline else 'Heartbeat'} successfully committed for shop_id: {shop['shop_id']} at {heartbeat_time}",
             flush=True,
         )
         stored_heartbeat = db.execute(
-            "SELECT last_seen, billing_paused, paid_until FROM shops WHERE shop_id = ?",
+            """
+            SELECT last_seen, last_heartbeat, billing_paused, paid_until
+            FROM shops WHERE shop_id = ?
+            """,
             (shop["shop_id"],),
         ).fetchone()
         stored_last_seen = stored_heartbeat["last_seen"] if stored_heartbeat else None
+        stored_last_heartbeat = (
+            stored_heartbeat["last_heartbeat"] if stored_heartbeat else None
+        )
         billing_paused = bool(stored_heartbeat["billing_paused"]) if stored_heartbeat else False
         paid_until = stored_heartbeat["paid_until"] if stored_heartbeat else None
         if isinstance(stored_last_seen, datetime):
             stored_last_seen = stored_last_seen.isoformat(timespec="seconds")
         print(
             f"--> [DEBUG] SQLite last_seen for shop_id: {shop['shop_id']} is {stored_last_seen}",
+            flush=True,
+        )
+        print(
+            f"--> [DEBUG] Stored last_heartbeat for shop_id: {shop['shop_id']} is {stored_last_heartbeat}",
             flush=True,
         )
         app.logger.info(

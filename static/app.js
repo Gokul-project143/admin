@@ -172,7 +172,7 @@
     const visibleShops = shops.filter((shop) => [
       shop.shopId,
       shop.shopName,
-      shop.currentVersion || "",
+      shop.installedVersion || shop.currentVersion || "",
       shop.online ? "online" : "offline",
     ].some((value) => String(value).toLocaleLowerCase().includes(query)));
     if (!visibleShops.length) {
@@ -187,9 +187,9 @@
       row.innerHTML = `
         <td><input class="shop-select" type="checkbox" value="${escapeHtml(shop.shopId)}" aria-label="Select ${escapeHtml(shop.shopName)}" ${selectedShops.has(shop.shopId) ? "checked" : ""}></td>
         <td>${escapeHtml(shop.shopId)}</td><td>${escapeHtml(shop.shopName)}</td>
-        <td>${escapeHtml(shop.currentVersion || "—")}</td>
+        <td>${escapeHtml(shop.installedVersion || shop.currentVersion || "—")}</td>
         <td><span class="badge ${shop.online ? "online" : "offline"}">${shop.online ? "Online" : "Offline"}</span></td>
-        <td>${escapeHtml(formatDate(shop.lastSeen))}</td>
+        <td>${escapeHtml(formatDate(shop.lastHeartbeat || shop.lastSeen))}</td>
         <td>${escapeHtml(shop.assignedVersion || "—")}</td>
         <td><button class="button secondary rotate-token" data-shop-id="${escapeHtml(shop.shopId)}" type="button">Rotate token</button></td>
         <td class="row-actions">
